@@ -1,14 +1,13 @@
-import os, requests, re, csv, time
-from bs4 import BeautifulSoup
-from fpdf import FPDF
-from PIL import Image
-from io import BytesIO
-import networkx as nx
-import matplotlib.pyplot as plt
+import os
+import re
+import csv
+import time
+import urllib.request
+from urllib.error import URLError, HTTPError
+from html import unescape
+from datetime import datetime
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
-SCREENSHOT_DIR = "screenshots"
-os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 SOCIAL_PLATFORMS = [
     "https://github.com/",
@@ -21,14 +20,29 @@ SOCIAL_PLATFORMS = [
 
 def generate_usernames(name):
     parts = name.lower().split()
-    usernames = []
+    usernames = set()
     if len(parts) >= 2:
-        usernames.append(parts[0]+parts[1])
-        usernames.append(parts[0]+'.'+parts[1])
-        usernames.append(parts[0][0]+parts[1])
-        usernames.append(parts[0]+parts[1][0])
-    usernames.append(''.join(parts))
-    return list(set(usernames))
+        first, last = parts[0], parts[-1]
+        usernames.update([
+            first+last,
+            first+'.'+last,
+            first[0]+last,
+            first+last[0],
+            last+first,
+            last+'.'+first,
+            last+first[0],
+            first+last+'_',
+            first+'_'+last,
+            last+'_'+first,
+            first[0]+'.'+last
+        ])
+    else:
+        usernames.add(parts[0])
+    return list(usernames)
+
+def clean_html(text):
+    text = re.sub(r'<.*?>', '', text)
+    return unescape(text.strip())
 
 def search_bing(name, pages=1):
     results = []
@@ -36,13 +50,14 @@ def search_bing(name, pages=1):
         start = page*10
         url = f'https://www.bing.com/search?q="{name}"&first={start}'
         try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
-            soup = BeautifulSoup(r.text, 'lxml')
-            for item in soup.select('li.b_algo'):
-                title = item.find('h2').text if item.find('h2') else ''
-                link = item.find('a')['href'] if item.find('a') else ''
-                snippet = item.find('p').text if item.find('p') else ''
-                results.append({'source':'Bing','title':title,'url':link,'snippet':snippet,'image':None})
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                html = response.read().decode('utf-8', errors='ignore')
+                links = re.findall(r'<a href="(http[s]?://[^"]+)"', html)
+                snippets = re.findall(r'<p>(.*?)</p>', html)
+                for i in range(min(len(links), len(snippets))):
+                    snippet = clean_html(snippets[i])
+                    results.append({'source':'Bing','title':links[i],'url':links[i],'snippet':snippet})
             time.sleep(1)
         except:
             continue
@@ -53,84 +68,43 @@ def search_social(usernames):
     for u in usernames:
         for platform in SOCIAL_PLATFORMS:
             url = platform + u
-            image_url = None
             try:
-                r = requests.get(url, headers=HEADERS, timeout=5)
-                if r.status_code==200:
-                    # Try to find a profile image from the HTML (basic pattern)
-                    soup = BeautifulSoup(r.text,'lxml')
-                    img_tag = soup.find('img')
-                    if img_tag and img_tag.get('src') and img_tag['src'].startswith('http'):
-                        image_url = img_tag['src']
-                    results.append({'source':platform,'title':f'Username: {u}','url':url,'snippet':'Profile found','image':image_url})
-            except:
+                req = urllib.request.Request(url, headers=HEADERS)
+                with urllib.request.urlopen(req, timeout=5):
+                    results.append({'source':platform,'title':f'Username: {u}','url':url,'snippet':'Profile found'})
+            except (HTTPError, URLError):
                 continue
     return results
 
 def extract_emails(text):
     return re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)
 
-def save_csv(data, file='report.csv'):
-    if not data: return
-    keys=data[0].keys()
-    with open(file,'w',newline='',encoding='utf-8') as f:
-        writer=csv.DictWriter(f,fieldnames=keys)
+def save_csv(data):
+    if not data:
+        print("No results found.")
+        return
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file = f'report_{timestamp}.csv'
+    keys = data[0].keys()
+    with open(file, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
         writer.writeheader()
-        writer.writerows(data)
-
-def download_image(url, index):
-    if not url: return None
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=5)
-        if 'image' in r.headers.get('Content-Type',''):
-            img = Image.open(BytesIO(r.content))
-            path = os.path.join(SCREENSHOT_DIR,f'image_{index}.png')
-            img.save(path)
-            return path
-    except:
-        return None
-
-def create_pdf(data, file='report.pdf'):
-    if not data: return
-    pdf=FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial",'B',16)
-    pdf.cell(0,10,"OSINT Report",ln=True,align="C")
-    pdf.set_font("Arial",'',12)
-    for i,item in enumerate(data,1):
-        pdf.multi_cell(0,8,f"{i}. Source: {item['source']}\nTitle: {item['title']}\nURL: {item['url']}\nEmails: {item.get('emails','')}\nSnippet: {item['snippet']}\n")
-        img_path = download_image(item['image'],i)
-        if img_path:
-            try:
-                pdf.image(img_path, w=100)
-            except:
-                continue
-        pdf.ln(5)
-    pdf.output(file)
-
-def create_graph(data, file='connections.png'):
-    G=nx.Graph()
-    for item in data:
-        node=item['title'] if item['title'] else item['url']
-        G.add_node(node)
-        for e in item.get('emails','').split(', '):
-            if e: G.add_node(e); G.add_edge(node,e)
-    plt.figure(figsize=(12,8))
-    nx.draw(G, with_labels=True, node_size=2000, node_color='skyblue', font_size=10, font_weight='bold')
-    plt.savefig(file)
+        for row in data:
+            row['url'] = f'=HYPERLINK("{row["url"]}", "{row["url"]}")'
+            writer.writerow(row)
+    print(f"CSV saved to '{file}'.")
 
 def main():
-    name=input("Enter full name: ")
-    usernames=generate_usernames(name)
-    data=[]
-    data+=search_bing(name)
-    data+=search_social(usernames)
+    name = input("Enter full name: ")
+    usernames = generate_usernames(name)
+    print(f"Generated {len(usernames)} username variations for social media.")
+    data = []
+    data += search_bing(name)
+    data += search_social(usernames)
     for r in data:
-        r['emails']=','.join(extract_emails(r['snippet']))
+        r['emails'] = ','.join(extract_emails(r['snippet']))
     save_csv(data)
-    create_pdf(data)
-    create_graph(data)
-    print(f"Done! {len(data)} results found. CSV, PDF, and connection graph saved.")
+    print(f"Done! Found {len(data)} results.")
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
