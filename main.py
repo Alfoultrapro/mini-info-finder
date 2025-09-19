@@ -1,16 +1,3 @@
-import sys
-import subprocess
-
-def install(package):
-    try:
-        __import__(package)
-    except ImportError:
-        print(f"[+] Installing {package}...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-for pkg in ["requests","beautifulsoup4","fpdf2","pillow","networkx","matplotlib","lxml"]:
-    install(pkg)
-
 import os, requests, re, csv, time
 from bs4 import BeautifulSoup
 from fpdf import FPDF
@@ -18,9 +5,7 @@ from PIL import Image
 from io import BytesIO
 import networkx as nx
 import matplotlib.pyplot as plt
-import socket
 
-TOR_PROXY = 'socks5h://127.0.0.1:9050'
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 SCREENSHOT_DIR = "screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
@@ -33,22 +18,6 @@ SOCIAL_PLATFORMS = [
     "https://www.facebook.com/",
     "https://www.tiktok.com/@"
 ]
-
-ONION_SITES = [
-    'http://msydqstlz2kzerdg.onion/',
-    'http://3g2upl4pq6kufc4m.onion/',
-    'http://torlinks2mn2l3.onion/',
-    'http://amg5evnwl2icg6jx.onion/',
-    'http://zqktlwi4fecvo6ri.onion/'
-]
-
-def tor_running(host='127.0.0.1', port=9050):
-    try:
-        s = socket.create_connection((host, port), timeout=2)
-        s.close()
-        return True
-    except:
-        return False
 
 def generate_usernames(name):
     parts = name.lower().split()
@@ -73,7 +42,7 @@ def search_bing(name, pages=1):
                 title = item.find('h2').text if item.find('h2') else ''
                 link = item.find('a')['href'] if item.find('a') else ''
                 snippet = item.find('p').text if item.find('p') else ''
-                results.append({'source':'Bing','title':title,'url':link,'snippet':snippet})
+                results.append({'source':'Bing','title':title,'url':link,'snippet':snippet,'image':None})
             time.sleep(1)
         except:
             continue
@@ -84,28 +53,18 @@ def search_social(usernames):
     for u in usernames:
         for platform in SOCIAL_PLATFORMS:
             url = platform + u
+            image_url = None
             try:
                 r = requests.get(url, headers=HEADERS, timeout=5)
                 if r.status_code==200:
-                    results.append({'source':platform,'title':f'Username: {u}','url':url,'snippet':'Profile found'})
+                    # Try to find a profile image from the HTML (basic pattern)
+                    soup = BeautifulSoup(r.text,'lxml')
+                    img_tag = soup.find('img')
+                    if img_tag and img_tag.get('src') and img_tag['src'].startswith('http'):
+                        image_url = img_tag['src']
+                    results.append({'source':platform,'title':f'Username: {u}','url':url,'snippet':'Profile found','image':image_url})
             except:
                 continue
-    return results
-
-def search_dark_web(name):
-    results=[]
-    if not tor_running():
-        return results
-    s = requests.Session()
-    s.proxies={'http':TOR_PROXY,'https':TOR_PROXY}
-    for onion in ONION_SITES:
-        try:
-            r = s.get(onion, headers=HEADERS, timeout=10)
-            if r.status_code==200 and name.lower() in r.text.lower():
-                results.append({'source':onion,'title':'Name Found','url':onion,'snippet':'Mention found'})
-            time.sleep(1)
-        except:
-            continue
     return results
 
 def extract_emails(text):
@@ -119,6 +78,18 @@ def save_csv(data, file='report.csv'):
         writer.writeheader()
         writer.writerows(data)
 
+def download_image(url, index):
+    if not url: return None
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=5)
+        if 'image' in r.headers.get('Content-Type',''):
+            img = Image.open(BytesIO(r.content))
+            path = os.path.join(SCREENSHOT_DIR,f'image_{index}.png')
+            img.save(path)
+            return path
+    except:
+        return None
+
 def create_pdf(data, file='report.pdf'):
     if not data: return
     pdf=FPDF()
@@ -128,6 +99,13 @@ def create_pdf(data, file='report.pdf'):
     pdf.set_font("Arial",'',12)
     for i,item in enumerate(data,1):
         pdf.multi_cell(0,8,f"{i}. Source: {item['source']}\nTitle: {item['title']}\nURL: {item['url']}\nEmails: {item.get('emails','')}\nSnippet: {item['snippet']}\n")
+        img_path = download_image(item['image'],i)
+        if img_path:
+            try:
+                pdf.image(img_path, w=100)
+            except:
+                continue
+        pdf.ln(5)
     pdf.output(file)
 
 def create_graph(data, file='connections.png'):
@@ -147,13 +125,12 @@ def main():
     data=[]
     data+=search_bing(name)
     data+=search_social(usernames)
-    data+=search_dark_web(name)
     for r in data:
         r['emails']=','.join(extract_emails(r['snippet']))
     save_csv(data)
     create_pdf(data)
     create_graph(data)
-    print(f"Done! {len(data)} results found.")
+    print(f"Done! {len(data)} results found. CSV, PDF, and connection graph saved.")
 
 if __name__=="__main__":
     main()
