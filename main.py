@@ -1,3 +1,16 @@
+import sys
+import subprocess
+
+def install(package):
+    try:
+        __import__(package)
+    except ImportError:
+        print(f"[+] Installing {package}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+for pkg in ["requests","beautifulsoup4","fpdf2","pillow","networkx","matplotlib","lxml"]:
+    install(pkg)
+
 import os, requests, re, csv, time
 from bs4 import BeautifulSoup
 from fpdf import FPDF
